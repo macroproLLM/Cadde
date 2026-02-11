@@ -438,6 +438,11 @@ function toggleDeafen() {
 function leaveVoice() {
     if (!currentChannel) return;
 
+    // Stop sharing if we are sharing
+    if (isSharingScreen) {
+        stopScreenShare();
+    }
+
     Object.keys(peers).forEach(removePeer);
 
     currentChannel = null;
@@ -823,9 +828,15 @@ function createPeer(userId, initiator) {
             }
 
             audio.play().catch(e => console.error(`Audio play failed for ${userId}:`, e));
+
+            // Clean up old audio element for this user if it exists
+            if (remoteStreams[userId]) {
+                const old = remoteStreams[userId];
+                if (old.parentNode) old.parentNode.removeChild(old);
+            }
+
             remoteStreams[userId] = audio;
-        }
-    });
+        });
 
     peer.on('close', () => removePeer(userId));
     peers[userId] = peer;
@@ -1093,38 +1104,51 @@ async function showScreenPicker() {
 
 async function startScreenShare(sourceId) {
     try {
+        console.log("Attempting to capture screen source:", sourceId);
         screenStream = await navigator.mediaDevices.getUserMedia({
             audio: false,
             video: {
                 mandatory: {
                     chromeMediaSource: 'desktop',
                     chromeMediaSourceId: sourceId,
-                    minWidth: 1280,
                     maxWidth: 1920,
-                    minHeight: 720,
-                    maxHeight: 1080,
-                    maxFrameRate: 30
+                    maxHeight: 1080
                 }
             }
         });
 
+        if (!screenStream) throw new Error("Could not get media stream from source.");
+
         isSharingScreen = true;
         const btn = document.getElementById('share-screen-btn');
-        btn.classList.add('active-share');
+        if (btn) btn.classList.add('active-share');
 
+        console.log("Screen captured, notifying peers...");
         // Add screen stream to all existing peers
         Object.values(peers).forEach(peer => {
-            peer.addStream(screenStream);
+            try {
+                if (peer.connected) {
+                    peer.addStream(screenStream);
+                }
+            } catch (e) {
+                console.warn(`Could not add stream to peer ${peer._id}:`, e);
+            }
         });
 
         // Handle stream ending (user clicks 'Stop Sharing' in OS bar)
-        screenStream.getVideoTracks()[0].onended = () => stopScreenShare();
+        const videoTrack = screenStream.getVideoTracks()[0];
+        if (videoTrack) {
+            videoTrack.onended = () => stopScreenShare();
+        }
 
         // Notify other users that we started sharing
         socket.emit('screen-share-started', { roomId: myRoomId, channelName: currentChannel });
+        console.log("Screen share started successfully.");
 
     } catch (err) {
         console.error('Screen share error:', err);
+        alert("Ekran paylaşımı başlatılamadı. Lütfen tekrar deneyin. Hata: " + err.message);
+        stopScreenShare();
     }
 }
 
