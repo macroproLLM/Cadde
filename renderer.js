@@ -127,7 +127,10 @@ async function initApp() {
     socket.on('voice-state-update', handleVoiceStateUpdate);
 
     socket.on('signal', ({ from, signal }) => {
-        if (peers[from]) peers[from].signal(signal);
+        if (!peers[from]) {
+            peers[from] = createPeer(from, false);
+        }
+        peers[from].signal(signal);
     });
 
     socket.on('user-disconnected', (id) => {
@@ -476,7 +479,12 @@ function refreshUserLists(users) {
     users.forEach(user => {
         // Handle Peer creation if in same channel
         if (currentChannel && user.channel === currentChannel && user.id !== socket.id) {
-            if (!peers[user.id]) peers[user.id] = createPeer(user.id, true);
+            if (!peers[user.id]) {
+                // Deterministic initiator: Only initiate if my ID is 'greater'
+                if (socket.id > user.id) {
+                    peers[user.id] = createPeer(user.id, true);
+                }
+            }
         }
 
         const div = document.createElement('div');
@@ -551,7 +559,7 @@ function createPeer(userId, initiator) {
     });
 
     peer.on('connect', () => {
-        console.log(`Peer connected: ${userId}`);
+        console.log(`Peer connected: ${userId} - Connection established`);
     });
 
     peer.on('error', (err) => {
@@ -559,17 +567,26 @@ function createPeer(userId, initiator) {
     });
 
     peer.on('stream', (stream) => {
-        console.log(`Received stream from ${userId}`);
-        const audio = new Audio();
+        console.log(`Received stream from ${userId}`, stream);
+        const audio = document.createElement('audio'); // Create element
         audio.srcObject = stream;
         audio.autoplay = true;
+        audio.playsInline = true; // For wider compatibility
         audio.muted = isDeaf;
+
+        // Attach to DOM (hidden) to satisfy some browser autoplay policies
+        audio.style.display = 'none';
+        document.body.appendChild(audio);
+
         if (selectedOutput !== 'default') {
-            // setSinkId is experimental/browser specific
             if (typeof audio.setSinkId === 'function') {
                 audio.setSinkId(selectedOutput).catch(err => console.warn('setSinkId failed', err));
             }
         }
+
+        // Explicit play attempt
+        audio.play().catch(e => console.error(`Audio play failed for ${userId}:`, e));
+
         remoteStreams[userId] = audio;
     });
 
@@ -585,6 +602,9 @@ function removePeer(id) {
     }
     if (remoteStreams[id]) {
         remoteStreams[id].pause();
+        if (remoteStreams[id].parentNode) {
+            remoteStreams[id].parentNode.removeChild(remoteStreams[id]);
+        }
         delete remoteStreams[id];
     }
     const indicator = document.getElementById(`status-${id}`);
