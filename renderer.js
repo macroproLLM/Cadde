@@ -28,13 +28,15 @@ function getAudioContext() {
 // Mixing Nodes
 let micNode = null;
 let systemNode = null;
-let masterGain = null; // New: centralized gain
+let masterGain = null; // Centralized gain
+let systemGain = null; // New: gain control for system audio (desktop sound)
 let mixerDest = null;
 let micHP = null;      // Highpass for mic
 
 // Audio States
 let isMuted = false;
 let isDeaf = false;
+let isSystemAudioMuted = false; // New state
 let isNoiseSuppressionEnabled = false; // ANC State
 
 let devices = { input: [], output: [] };
@@ -301,6 +303,7 @@ function renderMainView() {
                     </div>
                     <div style="display: flex; gap: 8px;">
                         <button class="icon-btn" id="share-screen-btn" title="Ekran Paylaş" style="font-size: 16px;">🖥️</button>
+                        <button class="icon-btn" id="system-audio-toggle" title="Sistem Sesini Kapat/Aç" style="font-size: 16px; display: none;">🎧</button>
                         <button class="icon-btn disconnect" id="voice-disconnect" title="Bağlantıyı Kes" style="font-size: 20px;">📞</button>
                     </div>
                 </div>
@@ -362,6 +365,7 @@ function setupMainControls() {
     document.getElementById('deafen-toggle').onclick = toggleDeafen;
     document.getElementById('voice-disconnect').onclick = leaveVoice;
     document.getElementById('share-screen-btn').onclick = toggleScreenShare;
+    document.getElementById('system-audio-toggle').onclick = toggleSystemAudio;
 
     document.getElementById('fix-audio-btn').onclick = async () => {
         const ctx = getAudioContext();
@@ -940,15 +944,22 @@ function refreshMixedStream() {
     // Setup Master Infrastructure
     if (!mixerDest) mixerDest = ctx.createMediaStreamDestination();
     if (!masterGain) masterGain = ctx.createGain();
+    if (!systemGain) systemGain = ctx.createGain(); // Initialize system gain
     if (!micHP) {
         micHP = ctx.createBiquadFilter();
         micHP.type = 'highpass';
         micHP.frequency.value = 150;
     }
 
-    // Clean connections from masterGain (but keep masterGain -> mixerDest)
+    // Clean connections
     try { masterGain.disconnect(); } catch (e) { }
+    try { systemGain.disconnect(); } catch (e) { }
+
     masterGain.connect(mixerDest);
+    systemGain.connect(masterGain);
+
+    // Update system gain state
+    systemGain.gain.setTargetAtTime(isSystemAudioMuted ? 0 : 1, ctx.currentTime, 0.05);
 
     // 1. Microphone
     if (hardwareStream && hardwareStream.getAudioTracks().length > 0) {
@@ -961,12 +972,18 @@ function refreshMixedStream() {
         if (meter) meter.style.display = 'block';
     }
 
-    // 2. System Audio
+    // 2. System Audio (Desktop Sound)
     if (screenStream && screenStream.getAudioTracks().length > 0) {
-        console.log("Adding system audio to mix...");
+        console.log("Adding system audio to mix via gain node...");
         if (systemNode) systemNode.disconnect();
         systemNode = ctx.createMediaStreamSource(screenStream);
-        systemNode.connect(masterGain);
+        systemNode.connect(systemGain); // Connect to systemGain instead of master directly
+
+        const toggleBtn = document.getElementById('system-audio-toggle');
+        if (toggleBtn) toggleBtn.style.display = 'block';
+    } else {
+        const toggleBtn = document.getElementById('system-audio-toggle');
+        if (toggleBtn) toggleBtn.style.display = 'none';
     }
 
     localStream = mixerDest.stream;
@@ -987,6 +1004,21 @@ function refreshMixedStream() {
     });
 
     setupVoiceActivityDetection(localStream);
+}
+
+function toggleSystemAudio() {
+    isSystemAudioMuted = !isSystemAudioMuted;
+    const btn = document.getElementById('system-audio-toggle');
+    if (btn) {
+        btn.classList.toggle('active', isSystemAudioMuted);
+        btn.innerText = isSystemAudioMuted ? '🔇' : '🎧';
+    }
+
+    // Smoothly transition gain
+    const ctx = getAudioContext();
+    if (systemGain) {
+        systemGain.gain.setTargetAtTime(isSystemAudioMuted ? 0 : 1, ctx.currentTime, 0.1);
+    }
 }
 
 function setupVoiceActivityDetection(stream) {
@@ -1258,10 +1290,11 @@ async function startScreenShare(sourceId) {
         socket.emit('screen-share-started', { roomId: myRoomId, channelName: currentChannel });
         console.log("Screen share started successfully.");
 
-        // Show local preview
+        // Show local preview (MUTED to prevent audio feedback loop)
         const vid = document.getElementById('shared-video');
         const container = document.getElementById('video-player-container');
         if (vid && container) {
+            vid.muted = true; // CRITICAL: Prevent taatatat loop
             vid.srcObject = screenStream;
             container.style.display = 'flex';
         }
