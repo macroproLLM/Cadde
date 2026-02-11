@@ -15,9 +15,16 @@ let ownerId = null; // Track who is the owner
 // Audio Globals
 let hardwareStream = null; // The raw mic stream
 let localStream = null;    // The stream sent to peers (possibly processed)
-let audioContext;
+let sharedAudioContext = null;
 let analyzer;
 let isSpeaking = false;
+
+function getAudioContext() {
+    if (!sharedAudioContext || sharedAudioContext.state === 'closed') {
+        sharedAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    return sharedAudioContext;
+}
 
 // Audio States
 let isMuted = false;
@@ -665,7 +672,9 @@ function joinVoiceChannel(channelName) {
 
 function playConnectionSound() {
     try {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const ctx = getAudioContext();
+        if (ctx.state === 'suspended') ctx.resume();
+
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
 
@@ -722,22 +731,21 @@ function createPeer(userId, initiator) {
     peer.on('stream', (stream) => {
         console.log(`Received stream from ${userId}`, stream);
 
-        // Process incoming audio: apply noise gate (highpass filter) to remove hum
-        const inCtx = new AudioContext();
-        const source = inCtx.createMediaStreamSource(stream);
+        const ctx = getAudioContext();
+        const source = ctx.createMediaStreamSource(stream);
 
-        // Highpass filter to remove low-frequency hum/rumble
-        const highpass = inCtx.createBiquadFilter();
+        // Highpass filter to remove low-frequency hum/rumble (ALWAYS applied for incoming)
+        const highpass = ctx.createBiquadFilter();
         highpass.type = 'highpass';
-        highpass.frequency.value = 85; // Cuts rumble below 85Hz
-        highpass.Q.value = 0.7;
+        highpass.frequency.value = 150; // Stricter cutoff for cleaner audio
+        highpass.Q.value = 1.0;
 
         // Lowpass to cut high-frequency hiss
-        const lowpass = inCtx.createBiquadFilter();
+        const lowpass = ctx.createBiquadFilter();
         lowpass.type = 'lowpass';
-        lowpass.frequency.value = 12000; // Cuts hiss above 12kHz
+        lowpass.frequency.value = 10000; // 10kHz cutoff
 
-        const destination = inCtx.createMediaStreamDestination();
+        const destination = ctx.createMediaStreamDestination();
         source.connect(highpass);
         highpass.connect(lowpass);
         lowpass.connect(destination);
@@ -792,15 +800,11 @@ function removePeer(id) {
 // --- Utilities ---
 
 async function startLocalAudio() {
-    // Validate context state. If suspended, resume.
-    if (audioContext && audioContext.state === 'suspended') {
-        await audioContext.resume();
-    }
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') await ctx.resume();
 
     // Stop previous streams
     if (hardwareStream) hardwareStream.getTracks().forEach(t => t.stop());
-    // Note: localStream might be a Destination stream, which doesn't have 'stop' on tracks the same way via source, 
-    // but good practice to stop tracks if they exist.
     if (localStream && localStream !== hardwareStream) {
         localStream.getTracks().forEach(t => t.stop());
     }
@@ -810,35 +814,26 @@ async function startLocalAudio() {
             audio: {
                 deviceId: selectedInput ? { exact: selectedInput } : undefined,
                 echoCancellation: true,
-                // If ANC is on, ask browser for heavy lifting too
-                noiseSuppression: isNoiseSuppressionEnabled ? { ideal: true } : false,
+                noiseSuppression: true,
                 autoGainControl: true
             }
         });
 
-        // Hybrid ANC Logic
-        if (isNoiseSuppressionEnabled) {
-            if (audioContext) audioContext.close();
-            audioContext = new AudioContext();
+        // Always apply a basic high-pass filter to the outgoing stream to prevent hum
+        const source = ctx.createMediaStreamSource(hardwareStream);
+        const highpass = ctx.createBiquadFilter();
+        highpass.type = 'highpass';
+        highpass.frequency.value = 150;
+        highpass.Q.value = 1.0;
 
-            const source = audioContext.createMediaStreamSource(hardwareStream);
-            const highpass = audioContext.createBiquadFilter();
+        const destination = ctx.createMediaStreamDestination();
+        source.connect(highpass);
 
-            // Improved Highpass Filter: Cuts low frequency rumble/hum
-            // Using 150Hz is safer for human voice while cutting more noise
-            highpass.type = 'highpass';
-            highpass.frequency.value = 150;
-            highpass.Q.value = 1.0;
+        // If ANC is on, add additional processing (already doing 150Hz hp above, we can add more if needed)
+        // For now, let's keep it simple: the 150Hz HP is the core "wind noise" fix.
+        highpass.connect(destination);
 
-            const destination = audioContext.createMediaStreamDestination();
-
-            source.connect(highpass);
-            highpass.connect(destination);
-
-            localStream = destination.stream;
-        } else {
-            localStream = hardwareStream;
-        }
+        localStream = destination.stream;
 
         setupVoiceActivityDetection(localStream);
         return true;
@@ -850,17 +845,10 @@ async function startLocalAudio() {
 }
 
 function setupVoiceActivityDetection(stream) {
-    // If using audioContext from ANC, reuse it. Otherwise create new for analysis.
-    if (!audioContext || audioContext.state === 'closed') {
-        audioContext = new AudioContext();
-    }
+    const ctx = getAudioContext();
 
-    // Create a new source for analysis specifically if needed, but we can reuse the graph?
-    // Be careful not to create loops. 
-    // Safest is to just create a separate analyser input from the stream provided.
-
-    const source = audioContext.createMediaStreamSource(stream);
-    analyzer = audioContext.createAnalyser();
+    const source = ctx.createMediaStreamSource(stream);
+    analyzer = ctx.createAnalyser();
     analyzer.fftSize = 512;
     source.connect(analyzer);
 
