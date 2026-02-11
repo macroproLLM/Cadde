@@ -22,9 +22,15 @@ let isSpeaking = false;
 function getAudioContext() {
     if (!sharedAudioContext || sharedAudioContext.state === 'closed') {
         sharedAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+        console.log("AudioContext created/resumed:", sharedAudioContext.state);
     }
     return sharedAudioContext;
 }
+
+// Mixing Nodes
+let micNode = null;
+let systemNode = null;
+let mixerDest = null;
 
 // Audio States
 let isMuted = false;
@@ -710,8 +716,12 @@ function refreshUserLists(users) {
     });
 }
 
-function joinVoiceChannel(channelName) {
+async function joinVoiceChannel(channelName) {
     if (currentChannel === channelName) return;
+
+    // Critical: Resume audio context on user click
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') await ctx.resume();
 
     // Disconnect old peers
     Object.keys(peers).forEach(removePeer);
@@ -752,8 +762,12 @@ function playConnectionSound() {
 
 function createPeer(userId, initiator) {
     const streams = [];
-    if (localStream) streams.push(localStream);
-    if (screenStream) streams.push(screenStream);
+    if (localStream) streams.push(localStream); // Mixed Audio
+    if (screenStream) {
+        // Only send video track here; audio is already mixed into localStream
+        const videoOnly = new MediaStream(screenStream.getVideoTracks());
+        streams.push(videoOnly);
+    }
 
     const peer = new Peer({
         initiator: initiator,
@@ -874,10 +888,9 @@ async function startLocalAudio() {
     const ctx = getAudioContext();
     if (ctx.state === 'suspended') await ctx.resume();
 
-    // Stop previous streams
-    if (hardwareStream) hardwareStream.getTracks().forEach(t => t.stop());
-    if (localStream && localStream !== hardwareStream) {
-        localStream.getTracks().forEach(t => t.stop());
+    // Stop previous hardware stream
+    if (hardwareStream) {
+        hardwareStream.getTracks().forEach(t => t.stop());
     }
 
     try {
@@ -890,40 +903,66 @@ async function startLocalAudio() {
             }
         });
 
-        // Always apply a basic high-pass filter to the outgoing stream to prevent hum
-        const source = ctx.createMediaStreamSource(hardwareStream);
-        const highpass = ctx.createBiquadFilter();
-        highpass.type = 'highpass';
-        highpass.frequency.value = 150;
-        highpass.Q.value = 1.0;
-
-        const destination = ctx.createMediaStreamDestination();
-        source.connect(highpass);
-
-        // If ANC is on, add additional processing (already doing 150Hz hp above, we can add more if needed)
-        // For now, let's keep it simple: the 150Hz HP is the core "wind noise" fix.
-        highpass.connect(destination);
-
-        localStream = destination.stream;
-
-        // Update active peers with the new stream/tracks
-        Object.values(peers).forEach(peer => {
-            if (peer.streams[0]) {
-                const oldTrack = peer.streams[0].getAudioTracks()[0];
-                const newTrack = localStream.getAudioTracks()[0];
-                if (oldTrack && newTrack) {
-                    peer.replaceTrack(oldTrack, newTrack, peer.streams[0]);
-                }
-            }
-        });
-
-        setupVoiceActivityDetection(localStream);
+        refreshMixedStream();
         return true;
 
     } catch (err) {
         console.error('Mic error:', err);
         return false;
     }
+}
+
+function refreshMixedStream() {
+    const ctx = getAudioContext();
+    if (ctx.state === 'suspended') ctx.resume();
+
+    if (!mixerDest) {
+        mixerDest = ctx.createMediaStreamDestination();
+    }
+
+    // Disconnect old nodes if they exist
+    if (micNode) { try { micNode.disconnect(); } catch (e) { } }
+    if (systemNode) { try { systemNode.disconnect(); } catch (e) { } }
+
+    // Connect Microphone
+    if (hardwareStream && hardwareStream.getAudioTracks().length > 0) {
+        micNode = ctx.createMediaStreamSource(hardwareStream);
+
+        // High-pass filter for mic (noise reduction)
+        const hp = ctx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.value = 150;
+
+        micNode.connect(hp);
+        hp.connect(mixerDest);
+    }
+
+    // Connect System Audio (Screen Share Audio)
+    if (screenStream && screenStream.getAudioTracks().length > 0) {
+        console.log("Adding system audio to mix...");
+        systemNode = ctx.createMediaStreamSource(screenStream);
+        systemNode.connect(mixerDest);
+    }
+
+    const oldLocalStream = localStream;
+    localStream = mixerDest.stream;
+
+    // Update active peers with the new mixed track
+    Object.values(peers).forEach(peer => {
+        try {
+            if (peer.streams[0]) {
+                const oldTrack = peer.streams[0].getAudioTracks()[0];
+                const newTrack = localStream.getAudioTracks()[0];
+                if (oldTrack && newTrack && oldTrack !== newTrack) {
+                    peer.replaceTrack(oldTrack, newTrack, peer.streams[0]);
+                }
+            }
+        } catch (e) {
+            console.warn("Track replacement failed for peer:", e);
+        }
+    });
+
+    setupVoiceActivityDetection(localStream);
 }
 
 function setupVoiceActivityDetection(stream) {
@@ -1131,9 +1170,18 @@ async function showScreenPicker() {
 
 async function startScreenShare(sourceId) {
     try {
-        console.log("Attempting to capture screen source:", sourceId);
+        console.log("Attempting to capture screen source with audio:", sourceId);
+
+        // Resume context on user action
+        const ctx = getAudioContext();
+        if (ctx.state === 'suspended') ctx.resume();
+
         screenStream = await navigator.mediaDevices.getUserMedia({
-            audio: false,
+            audio: {
+                mandatory: {
+                    chromeMediaSource: 'desktop'
+                }
+            },
             video: {
                 mandatory: {
                     chromeMediaSource: 'desktop',
@@ -1150,15 +1198,20 @@ async function startScreenShare(sourceId) {
         const btn = document.getElementById('share-screen-btn');
         if (btn) btn.classList.add('active-share');
 
+        // Mix system audio into our outbound stream
+        refreshMixedStream();
+
         console.log("Screen captured, notifying peers...");
-        // Add screen stream to all existing peers
+        // Add screen stream (video only) to all existing peers to avoid duplicate audio
+        const videoOnlyStream = new MediaStream(screenStream.getVideoTracks());
+
         Object.values(peers).forEach(peer => {
             try {
                 if (peer.connected) {
-                    peer.addStream(screenStream);
+                    peer.addStream(videoOnlyStream);
                 }
             } catch (e) {
-                console.warn(`Could not add stream to peer ${peer._id}:`, e);
+                console.warn(`Could not add stream to peer:`, e);
             }
         });
 
@@ -1200,6 +1253,10 @@ function stopScreenShare() {
         screenStream = null;
     }
     isSharingScreen = false;
+
+    // Remove system audio from mix
+    refreshMixedStream();
+
     const btn = document.getElementById('share-screen-btn');
     if (btn) btn.classList.remove('active-share');
 
