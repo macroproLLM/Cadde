@@ -1,7 +1,6 @@
 {
   "name": "discordvarimsi",
   "version": "1.0.0",
-  "description": "",
   "main": "src/main/main.js",
   "scripts": {
     "start": "node src/server/server.js",
@@ -19,26 +18,36 @@
     },
     "win": {
       "target": [
-        "portable"
+        "nsis"
       ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     }
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "voice",
+    "chat",
+    "p2p",
+    "webrtc"
+  ],
+  "author": "GhostChat Team",
+  "description": "A secure, P2P voice chat application.",
   "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
     "electron": "^40.3.0",
-    "electron-builder": "^26.7.0"
-  },
-  "dependencies": {
+    "electron-builder": "^26.7.0",
     "express": "^5.2.1",
+    "socket.io": "^4.8.3",
     "framer-motion": "^12.34.0",
     "lucide-react": "^0.563.0",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "dependencies": {
     "simple-peer": "^9.11.1",
-    "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3"
   }
 }
