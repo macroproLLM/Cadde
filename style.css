@@ -288,12 +288,14 @@ body {
 }
 
 /* Chat Main Area */
+/* Chat Main Area */
 .main-content {
   background-color: var(--bg-primary);
   display: flex;
   flex-direction: column;
   min-width: 0;
-  /* Prevents overflow */
+  overflow: hidden;
+  /* Ensure children don't stretch layout */
 }
 
 #messages-container {
@@ -302,6 +304,8 @@ body {
   padding: 20px;
   display: flex;
   flex-direction: column;
+  min-height: 0;
+  /* Allow flex item to shrink/scroll */
 }
 
 .chat-input-wrapper {
