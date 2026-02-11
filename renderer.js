@@ -1146,6 +1146,14 @@ async function startScreenShare(sourceId) {
         socket.emit('screen-share-started', { roomId: myRoomId, channelName: currentChannel });
         console.log("Screen share started successfully.");
 
+        // Show local preview
+        const vid = document.getElementById('shared-video');
+        const container = document.getElementById('video-player-container');
+        if (vid && container) {
+            vid.srcObject = screenStream;
+            container.style.display = 'flex';
+        }
+
     } catch (err) {
         console.error('Screen share error:', err);
         alert("Ekran paylaşımı başlatılamadı. Lütfen tekrar deneyin. Hata: " + err.message);
@@ -1167,7 +1175,13 @@ function stopScreenShare() {
     }
     isSharingScreen = false;
     const btn = document.getElementById('share-screen-btn');
-    btn.classList.remove('active-share');
+    if (btn) btn.classList.remove('active-share');
+
+    // Clear preview
+    const vid = document.getElementById('shared-video');
+    const container = document.getElementById('video-player-container');
+    if (vid) vid.srcObject = null;
+    if (container) container.style.display = 'none';
 
     socket.emit('screen-share-stopped', { roomId: myRoomId });
 }
