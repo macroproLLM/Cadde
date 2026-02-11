@@ -109,13 +109,18 @@ io.on('connection', (socket) => {
             const targetSocket = io.sockets.sockets.get(targetId);
             if (targetSocket) {
                 targetSocket.leave(roomId);
-                // Optionally disconnect connection
-                // targetSocket.disconnect(); 
             }
 
             room.users.splice(idx, 1);
             io.to(roomId).emit('user-list-update', room.users);
         }
+    });
+
+    socket.on('mute-user', ({ roomId, targetId }) => {
+        const room = rooms[roomId];
+        if (!room) return;
+        if (room.ownerId !== socket.id) return; // Only owner
+        io.to(targetId).emit('muted');
     });
 
     socket.on('join-channel', ({ roomId, channelName }) => {
