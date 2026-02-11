@@ -12,13 +12,18 @@ function createWindow() {
       contextIsolation: false // Simplifies WebRTC and Socket communication for this project
     },
     frame: false, // Custom title bar for Discord aesthetics
-    backgroundColor: '#313338'
+    backgroundColor: '#313338',
+    show: false // Don't show until ready
   });
 
   // In production, we would load the built index.html
   // For development with regular React/Vite, we'd use the dev server URL.
   // Since we are doing a manual setup, we will point to src/renderer/index.html
   mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
+
+  mainWindow.once('ready-to-show', () => {
+    mainWindow.show();
+  });
 
   // Open DevTools if needed
   // mainWindow.webContents.openDevTools();
