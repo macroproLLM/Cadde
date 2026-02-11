@@ -1,0 +1,44 @@
+{
+  "name": "discordvarimsi",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "node src/server/server.js",
+    "electron": "electron .",
+    "dev": "electron .",
+    "build": "electron-builder build --windows",
+    "server": "node src/server/server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "build": {
+    "appId": "com.ghostchat.app",
+    "productName": "GhostChat",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": [
+        "portable"
+      ]
+    }
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "electron": "^40.3.0",
+    "electron-builder": "^26.7.0"
+  },
+  "dependencies": {
+    "express": "^5.2.1",
+    "framer-motion": "^12.34.0",
+    "lucide-react": "^0.563.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "simple-peer": "^9.11.1",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
+  }
+}
