@@ -783,18 +783,26 @@ function createPeer(userId, initiator) {
     });
 
     peer.on('stream', (stream) => {
-        const isVideo = stream.getVideoTracks().length > 0;
-        console.log(`Received ${isVideo ? 'video' : 'audio'} stream from ${userId}`, stream);
+        const hasVideo = stream.getVideoTracks().length > 0;
+        const hasAudio = stream.getAudioTracks().length > 0;
 
-        if (isVideo) {
+        console.log(`Received stream from ${userId}: Video=${hasVideo}, Audio=${hasAudio}`);
+
+        if (hasVideo) {
             const vid = document.getElementById('shared-video');
-            vid.srcObject = stream;
-            document.getElementById('video-player-container').style.display = 'flex';
-        } else {
+            if (vid) {
+                vid.srcObject = stream;
+                document.getElementById('video-player-container').style.display = 'flex';
+            }
+        }
+
+        if (hasAudio) {
             const ctx = getAudioContext();
+            if (ctx.state === 'suspended') ctx.resume();
+
             const source = ctx.createMediaStreamSource(stream);
 
-            // Highpass filter to remove low-frequency hum/rumble (ALWAYS applied for incoming)
+            // Highpass filter to remove low-frequency hum/rumble
             const highpass = ctx.createBiquadFilter();
             highpass.type = 'highpass';
             highpass.frequency.value = 150;
@@ -898,6 +906,17 @@ async function startLocalAudio() {
 
         localStream = destination.stream;
 
+        // Update active peers with the new stream/tracks
+        Object.values(peers).forEach(peer => {
+            if (peer.streams[0]) {
+                const oldTrack = peer.streams[0].getAudioTracks()[0];
+                const newTrack = localStream.getAudioTracks()[0];
+                if (oldTrack && newTrack) {
+                    peer.replaceTrack(oldTrack, newTrack, peer.streams[0]);
+                }
+            }
+        });
+
         setupVoiceActivityDetection(localStream);
         return true;
 
@@ -910,6 +929,11 @@ async function startLocalAudio() {
 function setupVoiceActivityDetection(stream) {
     const ctx = getAudioContext();
 
+    // Clean up previous analyzer if it exists
+    if (analyzer) {
+        try { analyzer.disconnect(); } catch (e) { }
+    }
+
     const source = ctx.createMediaStreamSource(stream);
     analyzer = ctx.createAnalyser();
     analyzer.fftSize = 512;
@@ -919,12 +943,14 @@ function setupVoiceActivityDetection(stream) {
     const dataArray = new Uint8Array(bufferLength);
 
     const checkSpeaking = () => {
+        if (!analyzer) return; // Stop if cleaned up
         analyzer.getByteFrequencyData(dataArray);
         let sum = 0;
         for (let i = 0; i < bufferLength; i++) sum += dataArray[i];
         let average = sum / bufferLength;
 
-        const speaking = average > 15;
+        // Lowered threshold to 10 for better sensitivity
+        const speaking = average > 10;
         if (speaking !== isSpeaking) {
             isSpeaking = speaking;
             if (socket?.connected) socket.emit('voice-state', { roomId: myRoomId, isSpeaking });
