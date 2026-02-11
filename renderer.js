@@ -1043,6 +1043,54 @@ function showSettings() {
     };
 }
 
+// --- Screen Sharing Logic ---
+
+async function toggleScreenShare() {
+    if (isSharingScreen) {
+        stopScreenShare();
+    } else {
+        await showScreenPicker();
+    }
+}
+
+async function showScreenPicker() {
+    const sources = await ipcRenderer.invoke('get-screen-sources');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'overlay';
+    overlay.style.zIndex = "2000"; // Above everything
+
+    overlay.innerHTML = `
+        <div class="screen-picker">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2 style="font-size: 18px;">Ekran Paylaş</h2>
+                <button class="icon-btn" id="close-picker" style="font-size: 20px;">✕</button>
+            </div>
+            <div class="source-grid" id="source-grid">
+                ${sources.map(s => `
+                    <div class="source-item" data-id="${s.id}">
+                        <img src="${s.thumbnail}">
+                        <span>${s.name}</span>
+                    </div>
+                `).join('')}
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    document.getElementById('close-picker').onclick = () => overlay.remove();
+
+    const items = overlay.querySelectorAll('.source-item');
+    items.forEach(item => {
+        item.onclick = async () => {
+            const sourceId = item.getAttribute('data-id');
+            overlay.remove();
+            await startScreenShare(sourceId);
+        };
+    });
+}
+
 async function startScreenShare(sourceId) {
     try {
         screenStream = await navigator.mediaDevices.getUserMedia({
