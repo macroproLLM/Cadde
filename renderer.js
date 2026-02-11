@@ -4,7 +4,7 @@ const Peer = require('simple-peer');
 
 // --- Configurable Server URL ---
 // const SERVER_URL = 'http://localhost:3000';
-const SERVER_URL = 'https://cadde.onrender.com'; // Production URL
+const SERVER_URL = 'https://cadde-3da9.onrender.com'; // Production URL
 
 let socket;
 let myNickname = '';
