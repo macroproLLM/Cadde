@@ -836,7 +836,8 @@ function createPeer(userId, initiator) {
             }
 
             remoteStreams[userId] = audio;
-        });
+        }
+    });
 
     peer.on('close', () => removePeer(userId));
     peers[userId] = peer;
