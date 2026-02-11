@@ -498,33 +498,78 @@ function joinVoiceChannel(channelName) {
 
     currentChannel = channelName;
     socket.emit('join-channel', { roomId: myRoomId, channelName });
+    playConnectionSound();
     updateVoiceUI();
+}
+
+function playConnectionSound() {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        // Nice "ding" sound
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(440, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(880, ctx.currentTime + 0.1);
+
+        gain.gain.setValueAtTime(0.1, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.5);
+    } catch (e) {
+        console.error("Sound play failed", e);
+    }
 }
 
 // --- Peer Logic ---
 
 function createPeer(userId, initiator) {
-    // Determine which stream to send: processed logic is in startLocalAudio
-    // If localStream is null (mic error), send nothing or handle error
     const streamToSend = localStream || hardwareStream;
 
     const peer = new Peer({
         initiator: initiator,
-        trickle: false,
+        trickle: true, // Enable trickle ICE for better connectivity
         stream: streamToSend,
-        config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+        config: {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun3.l.google.com:19302' },
+                { urls: 'stun:stun4.l.google.com:19302' }
+            ]
+        }
     });
 
     peer.on('signal', (data) => {
         socket.emit('signal', { to: userId, from: socket.id, signal: data });
     });
 
+    peer.on('connect', () => {
+        console.log(`Peer connected: ${userId}`);
+    });
+
+    peer.on('error', (err) => {
+        console.error(`Peer error with ${userId}:`, err);
+    });
+
     peer.on('stream', (stream) => {
+        console.log(`Received stream from ${userId}`);
         const audio = new Audio();
         audio.srcObject = stream;
         audio.autoplay = true;
         audio.muted = isDeaf;
-        if (selectedOutput !== 'default') audio.setSinkId(selectedOutput);
+        if (selectedOutput !== 'default') {
+            // setSinkId is experimental/browser specific
+            if (typeof audio.setSinkId === 'function') {
+                audio.setSinkId(selectedOutput).catch(err => console.warn('setSinkId failed', err));
+            }
+        }
         remoteStreams[userId] = audio;
     });
 
