@@ -153,21 +153,6 @@ io.on('connection', (socket) => {
         socket.to(roomId).emit('voice-state-update', { id: socket.id, isSpeaking });
     });
 
-    // Screen Sharing Events
-    socket.on('screen-share-started', ({ roomId, channelName }) => {
-        const room = rooms[roomId];
-        const user = room?.users.find(u => u.id === socket.id);
-        socket.to(roomId).emit('user-screen-share-started', {
-            id: socket.id,
-            nickname: user ? user.nickname : 'Bilinmeyen',
-            channelName
-        });
-    });
-
-    socket.on('screen-share-stopped', ({ roomId }) => {
-        socket.to(roomId).emit('user-screen-share-stopped', { id: socket.id });
-    });
-
     socket.on('disconnect', () => {
         for (const roomId in rooms) {
             const index = rooms[roomId].users.findIndex(u => u.id === socket.id);
