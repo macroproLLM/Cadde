@@ -155,7 +155,13 @@ io.on('connection', (socket) => {
 
     // Screen Sharing Events
     socket.on('screen-share-started', ({ roomId, channelName }) => {
-        socket.to(roomId).emit('user-screen-share-started', { id: socket.id, nickname: users[socket.id]?.nickname, channelName });
+        const room = rooms[roomId];
+        const user = room?.users.find(u => u.id === socket.id);
+        socket.to(roomId).emit('user-screen-share-started', {
+            id: socket.id,
+            nickname: user ? user.nickname : 'Bilinmeyen',
+            channelName
+        });
     });
 
     socket.on('screen-share-stopped', ({ roomId }) => {
