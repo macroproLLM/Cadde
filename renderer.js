@@ -15,8 +15,6 @@ let ownerId = null; // Track who is the owner
 // Audio Globals
 let hardwareStream = null; // The raw mic stream
 let localStream = null;    // The stream sent to peers (possibly processed)
-let sharedAudioContext = null;
-let analyzer;
 let isSpeaking = false;
 
 function getAudioContext() {
@@ -30,7 +28,9 @@ function getAudioContext() {
 // Mixing Nodes
 let micNode = null;
 let systemNode = null;
+let masterGain = null; // New: centralized gain
 let mixerDest = null;
+let micHP = null;      // Highpass for mic
 
 // Audio States
 let isMuted = false;
@@ -46,8 +46,13 @@ const peers = {};
 const remoteStreams = {}; // Keep track for deafen logic
 const userVolumes = {}; // Per-user volume: userVolumes[socketId] = 0.0 - 1.0
 
+// Audio Buffers/Context
+let sharedAudioContext = null;
+let analyzer;
+
 // Screen Sharing States
 let screenStream = null;
+let screenVideoOnlyStream = null; // Reference for peers
 let isSharingScreen = false;
 let videoPeers = {}; // Separate peers for video transmission to avoid track mixing issues in Simple-Peer
 
@@ -204,6 +209,8 @@ async function initApp() {
 
     socket.on('signal', ({ from, signal }) => {
         if (!peers[from]) {
+            console.log(`Received signal from unknown peer ${from}, creating...`);
+            // We are NOT the initiator if we just received a signal
             peers[from] = createPeer(from, false);
         }
         peers[from].signal(signal);
@@ -264,22 +271,28 @@ function renderMainView() {
                 </div>
                 
                 <!-- Bottom Panel -->
-                <div class="user-panel">
-                    <div class="avatar" id="me-avatar">${myNickname[0].toUpperCase()}</div>
-                    <div style="flex: 1; min-width: 0;">
-                        <div style="font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${myNickname}</div>
-                        <div style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px;">
-                            <div id="self-status" class="status-indicator"></div>
-                            <span id="self-status-text">Seste Değil</span>
+                    <div class="user-panel">
+                        <div style="position: relative;">
+                            <div class="avatar" id="me-avatar">${myNickname[0].toUpperCase()}</div>
+                            <div id="mic-meter" style="position: absolute; bottom: -2px; left: 0; right: 0; height: 3px; background: #232428; border-radius: 2px; overflow: hidden; display: none;">
+                                <div id="mic-meter-bar" style="height: 100%; width: 0%; background: #23a559; transition: width 0.1s;"></div>
+                            </div>
+                        </div>
+                        <div style="flex: 1; min-width: 0;">
+                            <div style="font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${myNickname}</div>
+                            <div style="font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 4px;">
+                                <div id="self-status" class="status-indicator"></div>
+                                <span id="self-status-text">Seste Değil</span>
+                            </div>
+                        </div>
+                        <div class="panel-controls">
+                             <button class="icon-btn" id="fix-audio-btn" title="Ses Sorununu Gider" style="font-size: 14px;">🔊</button>
+                             <button class="icon-btn ${isNoiseSuppressionEnabled ? 'active-anc' : ''}" id="anc-toggle-btn" title="Gürültü Engelleme (ANC)">⚡</button>
+                            <button class="icon-btn" id="mute-toggle" title="Mikrofonu Kapat">🎤</button>
+                            <button class="icon-btn" id="deafen-toggle" title="Sesleri Kapat">🎧</button>
+                            <button class="icon-btn" id="settings-btn" title="Ayarlar">⚙️</button>
                         </div>
                     </div>
-                    <div class="panel-controls">
-                         <button class="icon-btn ${isNoiseSuppressionEnabled ? 'active-anc' : ''}" id="anc-toggle-btn" title="Gürültü Engelleme (ANC)">⚡</button>
-                        <button class="icon-btn" id="mute-toggle" title="Mikrofonu Kapat">🎤</button>
-                        <button class="icon-btn" id="deafen-toggle" title="Sesleri Kapat">🎧</button>
-                        <button class="icon-btn" id="settings-btn" title="Ayarlar">⚙️</button>
-                    </div>
-                </div>
                 
                 <!-- Connection Panel (Appears when in voice) -->
                 <div id="voice-control-panel" style="display: none; height: 40px; background: #1e1f22; border-top: 1px solid var(--border); padding: 0 12px; display: flex; align-items: center; justify-content: space-between;">
@@ -349,6 +362,12 @@ function setupMainControls() {
     document.getElementById('deafen-toggle').onclick = toggleDeafen;
     document.getElementById('voice-disconnect').onclick = leaveVoice;
     document.getElementById('share-screen-btn').onclick = toggleScreenShare;
+
+    document.getElementById('fix-audio-btn').onclick = async () => {
+        const ctx = getAudioContext();
+        await ctx.resume();
+        alert("Ses sistemi sıfırlandı. Ses gelmiyorsa lütfen karşı tarafa da bu butona basmasını söyleyin.");
+    };
     document.getElementById('stop-watch-btn').onclick = () => {
         document.getElementById('video-player-container').style.display = 'none';
         const vid = document.getElementById('shared-video');
@@ -667,8 +686,12 @@ function refreshUserLists(users) {
         if (currentChannel && user.channel === currentChannel && user.id !== socket.id) {
             if (!peers[user.id]) {
                 // Deterministic initiator: Only initiate if my ID is 'greater'
+                // This prevents race conditions where both try to initiate
                 if (socket.id > user.id) {
+                    console.log(`Initiating connection with ${user.nickname} (${user.id})`);
                     peers[user.id] = createPeer(user.id, true);
+                } else {
+                    console.log(`Waiting for ${user.nickname} (${user.id}) to initiate...`);
                 }
             }
         }
@@ -763,10 +786,8 @@ function playConnectionSound() {
 function createPeer(userId, initiator) {
     const streams = [];
     if (localStream) streams.push(localStream); // Mixed Audio
-    if (screenStream) {
-        // Only send video track here; audio is already mixed into localStream
-        const videoOnly = new MediaStream(screenStream.getVideoTracks());
-        streams.push(videoOnly);
+    if (screenVideoOnlyStream) {
+        streams.push(screenVideoOnlyStream);
     }
 
     const peer = new Peer({
@@ -916,49 +937,52 @@ function refreshMixedStream() {
     const ctx = getAudioContext();
     if (ctx.state === 'suspended') ctx.resume();
 
-    if (!mixerDest) {
-        mixerDest = ctx.createMediaStreamDestination();
+    // Setup Master Infrastructure
+    if (!mixerDest) mixerDest = ctx.createMediaStreamDestination();
+    if (!masterGain) masterGain = ctx.createGain();
+    if (!micHP) {
+        micHP = ctx.createBiquadFilter();
+        micHP.type = 'highpass';
+        micHP.frequency.value = 150;
     }
 
-    // Disconnect old nodes if they exist
-    if (micNode) { try { micNode.disconnect(); } catch (e) { } }
-    if (systemNode) { try { systemNode.disconnect(); } catch (e) { } }
+    // Clean connections from masterGain (but keep masterGain -> mixerDest)
+    try { masterGain.disconnect(); } catch (e) { }
+    masterGain.connect(mixerDest);
 
-    // Connect Microphone
+    // 1. Microphone
     if (hardwareStream && hardwareStream.getAudioTracks().length > 0) {
+        if (micNode) micNode.disconnect();
         micNode = ctx.createMediaStreamSource(hardwareStream);
+        micNode.connect(micHP);
+        micHP.connect(masterGain);
 
-        // High-pass filter for mic (noise reduction)
-        const hp = ctx.createBiquadFilter();
-        hp.type = 'highpass';
-        hp.frequency.value = 150;
-
-        micNode.connect(hp);
-        hp.connect(mixerDest);
+        const meter = document.getElementById('mic-meter');
+        if (meter) meter.style.display = 'block';
     }
 
-    // Connect System Audio (Screen Share Audio)
+    // 2. System Audio
     if (screenStream && screenStream.getAudioTracks().length > 0) {
         console.log("Adding system audio to mix...");
+        if (systemNode) systemNode.disconnect();
         systemNode = ctx.createMediaStreamSource(screenStream);
-        systemNode.connect(mixerDest);
+        systemNode.connect(masterGain);
     }
 
-    const oldLocalStream = localStream;
     localStream = mixerDest.stream;
 
-    // Update active peers with the new mixed track
+    // Update active peers
     Object.values(peers).forEach(peer => {
         try {
             if (peer.streams[0]) {
                 const oldTrack = peer.streams[0].getAudioTracks()[0];
                 const newTrack = localStream.getAudioTracks()[0];
-                if (oldTrack && newTrack && oldTrack !== newTrack) {
+                if (oldTrack && newTrack && oldTrack.id !== newTrack.id) {
                     peer.replaceTrack(oldTrack, newTrack, peer.streams[0]);
                 }
             }
         } catch (e) {
-            console.warn("Track replacement failed for peer:", e);
+            console.warn("Track replacement failed:", e);
         }
     });
 
@@ -990,6 +1014,15 @@ function setupVoiceActivityDetection(stream) {
 
         // Lowered threshold to 10 for better sensitivity
         const speaking = average > 10;
+
+        // Update local mic meter
+        const meterBar = document.getElementById('mic-meter-bar');
+        if (meterBar) {
+            const width = Math.min(100, average * 3);
+            meterBar.style.width = `${width}%`;
+            meterBar.style.backgroundColor = width > 20 ? '#23a559' : '#232428';
+        }
+
         if (speaking !== isSpeaking) {
             isSpeaking = speaking;
             if (socket?.connected) socket.emit('voice-state', { roomId: myRoomId, isSpeaking });
@@ -1203,12 +1236,12 @@ async function startScreenShare(sourceId) {
 
         console.log("Screen captured, notifying peers...");
         // Add screen stream (video only) to all existing peers to avoid duplicate audio
-        const videoOnlyStream = new MediaStream(screenStream.getVideoTracks());
+        screenVideoOnlyStream = new MediaStream(screenStream.getVideoTracks());
 
         Object.values(peers).forEach(peer => {
             try {
                 if (peer.connected) {
-                    peer.addStream(videoOnlyStream);
+                    peer.addStream(screenVideoOnlyStream);
                 }
             } catch (e) {
                 console.warn(`Could not add stream to peer:`, e);
@@ -1245,12 +1278,15 @@ function stopScreenShare() {
         // Remove stream from all peers before stopping tracks
         Object.values(peers).forEach(peer => {
             try {
-                peer.removeStream(screenStream);
+                if (screenVideoOnlyStream) {
+                    peer.removeStream(screenVideoOnlyStream);
+                }
             } catch (e) { console.warn("removeStream failed", e); }
         });
 
         screenStream.getTracks().forEach(t => t.stop());
         screenStream = null;
+        screenVideoOnlyStream = null;
     }
     isSharingScreen = false;
 
