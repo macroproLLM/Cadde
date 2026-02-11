@@ -31,6 +31,45 @@ let selectedOutput = 'default';
 // peers[socketId] = Peer instance
 const peers = {};
 const remoteStreams = {}; // Keep track for deafen logic
+const userVolumes = {}; // Per-user volume: userVolumes[socketId] = 0.0 - 1.0
+
+// --- localStorage Persistence ---
+function saveSettings() {
+    const settings = {
+        selectedInput,
+        selectedOutput,
+        isNoiseSuppressionEnabled,
+        myNickname,
+        myRoomId
+    };
+    localStorage.setItem('ghostchat-settings', JSON.stringify(settings));
+}
+
+function loadSettings() {
+    try {
+        const raw = localStorage.getItem('ghostchat-settings');
+        if (raw) return JSON.parse(raw);
+    } catch (e) { console.warn('Failed to load settings', e); }
+    return null;
+}
+
+function saveMessages(roomId, messages) {
+    try {
+        // Keep last 50 messages
+        const trimmed = messages.slice(-50);
+        localStorage.setItem(`ghostchat-msgs-${roomId}`, JSON.stringify(trimmed));
+    } catch (e) { console.warn('Failed to save messages', e); }
+}
+
+function loadMessages(roomId) {
+    try {
+        const raw = localStorage.getItem(`ghostchat-msgs-${roomId}`);
+        if (raw) return JSON.parse(raw);
+    } catch (e) { console.warn('Failed to load messages', e); }
+    return [];
+}
+
+let messageHistory = []; // Current room messages
 
 // UI Elements
 const root = document.getElementById('root');
@@ -77,12 +116,23 @@ function showLogin() {
 
     setupWindowControls();
 
+    // Restore saved values
+    const saved = loadSettings();
+    if (saved) {
+        if (saved.myNickname) document.getElementById('nickname-input').value = saved.myNickname;
+        if (saved.myRoomId) document.getElementById('room-input').value = saved.myRoomId;
+        if (saved.selectedInput) selectedInput = saved.selectedInput;
+        if (saved.selectedOutput) selectedOutput = saved.selectedOutput;
+        if (saved.isNoiseSuppressionEnabled) isNoiseSuppressionEnabled = saved.isNoiseSuppressionEnabled;
+    }
+
     document.getElementById('join-btn').onclick = () => {
         const nick = document.getElementById('nickname-input').value;
         const code = document.getElementById('room-input').value;
         if (nick && code) {
             myNickname = nick;
             myRoomId = code;
+            saveSettings();
             initApp();
         } else {
             alert('Lütfen tüm alanları doldurun!');
@@ -107,6 +157,13 @@ async function initApp() {
         renderChannels(state.channels, state.users);
         refreshUserLists(state.users);
         updateOwnerControls();
+
+        // Restore message history
+        const saved = loadMessages(myRoomId);
+        if (saved.length > 0) {
+            messageHistory = saved;
+            saved.forEach(msg => addMessageToUI(msg));
+        }
     });
 
     socket.on('new-message', addMessage);
@@ -140,6 +197,11 @@ async function initApp() {
     socket.on('kicked', () => {
         alert('Bu odadan atıldınız!');
         window.location.reload();
+    });
+
+    socket.on('muted', () => {
+        if (!isMuted) toggleMute();
+        alert('Yönetici tarafından sesiniz kapatıldı.');
     });
 }
 
@@ -263,6 +325,7 @@ function updateOwnerControls() {
 
 async function toggleNoiseSuppression() {
     isNoiseSuppressionEnabled = !isNoiseSuppressionEnabled;
+    saveSettings();
     const btn = document.getElementById('anc-toggle-btn');
     if (btn) {
         btn.classList.toggle('active-anc', isNoiseSuppressionEnabled);
@@ -413,14 +476,37 @@ function renderChannels(channels, users = []) {
                 // Prevent clicking user triggers join logic 
                 userItem.onclick = (e) => e.stopPropagation();
 
-                // Right-click on user (Owner)
+                // Right-click on user
                 userItem.oncontextmenu = (e) => {
                     e.stopPropagation();
-                    if (socket.id === ownerId && u.id !== socket.id) {
-                        showContextMenu(e.clientX, e.clientY, [
+                    e.preventDefault();
+                    if (u.id === socket.id) return; // Can't right-click yourself
+
+                    const menuOptions = [];
+
+                    // Volume control (available to everyone for their own listening)
+                    const currentVol = userVolumes[u.id] !== undefined ? userVolumes[u.id] : 1.0;
+                    menuOptions.push({
+                        label: `Ses: %${Math.round(currentVol * 100)}`,
+                        isSlider: true,
+                        value: currentVol,
+                        onChange: (val) => {
+                            userVolumes[u.id] = val;
+                            if (remoteStreams[u.id]) {
+                                remoteStreams[u.id].volume = val;
+                            }
+                        }
+                    });
+
+                    // Owner-only options
+                    if (socket.id === ownerId) {
+                        menuOptions.push(
+                            { label: 'Sesini Kapat', action: () => socket.emit('mute-user', { roomId: myRoomId, targetId: u.id }), danger: false },
                             { label: 'Odadan At', action: () => socket.emit('kick-user', { roomId: myRoomId, targetId: u.id }), danger: true }
-                        ]);
+                        );
                     }
+
+                    showContextMenu(e.clientX, e.clientY, menuOptions);
                 };
 
                 subList.appendChild(userItem);
@@ -444,25 +530,60 @@ function showContextMenu(x, y, options) {
     menu.style.borderRadius = '4px';
     menu.style.boxShadow = '0 8px 16px rgba(0,0,0,0.4)';
     menu.style.zIndex = '9999';
-    menu.style.minWidth = '120px';
+    menu.style.minWidth = '160px';
 
     options.forEach(opt => {
-        const div = document.createElement('div');
-        div.innerText = opt.label;
-        div.style.padding = '8px 12px';
-        div.style.fontSize = '13px';
-        div.style.cursor = 'pointer';
-        div.style.color = opt.danger ? '#da373c' : '#dbdee1';
-        div.style.borderRadius = '2px';
+        if (opt.isSlider) {
+            // Volume slider item
+            const wrapper = document.createElement('div');
+            wrapper.style.padding = '8px 12px';
 
-        div.onmouseover = () => { div.style.backgroundColor = opt.danger ? '#da373c' : '#4752c4'; div.style.color = 'white'; };
-        div.onmouseout = () => { div.style.backgroundColor = 'transparent'; div.style.color = opt.danger ? '#da373c' : '#dbdee1'; };
+            const label = document.createElement('div');
+            label.style.fontSize = '11px';
+            label.style.color = '#949ba4';
+            label.style.marginBottom = '6px';
+            label.innerText = opt.label;
+            wrapper.appendChild(label);
 
-        div.onclick = () => {
-            opt.action();
-            menu.remove();
-        };
-        menu.appendChild(div);
+            const slider = document.createElement('input');
+            slider.type = 'range';
+            slider.min = '0';
+            slider.max = '100';
+            slider.value = Math.round(opt.value * 100);
+            slider.style.width = '100%';
+            slider.style.cursor = 'pointer';
+            slider.style.accentColor = '#5865f2';
+
+            slider.oninput = () => {
+                const val = parseInt(slider.value) / 100;
+                opt.onChange(val);
+                label.innerText = `Ses: %${slider.value}`;
+            };
+
+            // Prevent menu from closing when interacting with slider
+            slider.onclick = (e) => e.stopPropagation();
+
+            wrapper.appendChild(slider);
+            menu.appendChild(wrapper);
+        } else {
+            // Regular button item
+            const div = document.createElement('div');
+            div.innerText = opt.label;
+            div.style.padding = '8px 12px';
+            div.style.fontSize = '13px';
+            div.style.cursor = 'pointer';
+            div.style.color = opt.danger ? '#da373c' : '#dbdee1';
+            div.style.borderRadius = '2px';
+
+            div.onmouseover = () => { div.style.backgroundColor = opt.danger ? '#da373c' : '#4752c4'; div.style.color = 'white'; };
+            div.onmouseout = () => { div.style.backgroundColor = 'transparent'; div.style.color = opt.danger ? '#da373c' : '#dbdee1'; };
+
+            div.onclick = () => {
+                opt.action();
+                menu.remove();
+            };
+            menu.appendChild(div);
+        }
     });
 
     document.body.appendChild(menu);
@@ -494,6 +615,38 @@ function refreshUserLists(users) {
             <div style="flex: 1; font-size: 14px;">${user.nickname}</div>
             <div id="status-${user.id}" class="status-indicator ${user.channel ? 'connected' : ''}"></div>
         `;
+
+        // Right-click on user in sidebar
+        div.oncontextmenu = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (user.id === socket.id) return;
+
+            const menuOptions = [];
+            const currentVol = userVolumes[user.id] !== undefined ? userVolumes[user.id] : 1.0;
+
+            menuOptions.push({
+                label: `Ses: %${Math.round(currentVol * 100)}`,
+                isSlider: true,
+                value: currentVol,
+                onChange: (val) => {
+                    userVolumes[user.id] = val;
+                    if (remoteStreams[user.id]) {
+                        remoteStreams[user.id].volume = val;
+                    }
+                }
+            });
+
+            if (socket.id === ownerId) {
+                menuOptions.push(
+                    { label: 'Sesini Kapat', action: () => socket.emit('mute-user', { roomId: myRoomId, targetId: user.id }), danger: false },
+                    { label: 'Odadan At', action: () => socket.emit('kick-user', { roomId: myRoomId, targetId: user.id }), danger: true }
+                );
+            }
+
+            showContextMenu(e.clientX, e.clientY, menuOptions);
+        };
+
         memberList.appendChild(div);
     });
 }
@@ -568,13 +721,38 @@ function createPeer(userId, initiator) {
 
     peer.on('stream', (stream) => {
         console.log(`Received stream from ${userId}`, stream);
-        const audio = document.createElement('audio'); // Create element
-        audio.srcObject = stream;
+
+        // Process incoming audio: apply noise gate (highpass filter) to remove hum
+        const inCtx = new AudioContext();
+        const source = inCtx.createMediaStreamSource(stream);
+
+        // Highpass filter to remove low-frequency hum/rumble
+        const highpass = inCtx.createBiquadFilter();
+        highpass.type = 'highpass';
+        highpass.frequency.value = 85; // Cuts rumble below 85Hz
+        highpass.Q.value = 0.7;
+
+        // Lowpass to cut high-frequency hiss
+        const lowpass = inCtx.createBiquadFilter();
+        lowpass.type = 'lowpass';
+        lowpass.frequency.value = 12000; // Cuts hiss above 12kHz
+
+        const destination = inCtx.createMediaStreamDestination();
+        source.connect(highpass);
+        highpass.connect(lowpass);
+        lowpass.connect(destination);
+
+        const audio = document.createElement('audio');
+        audio.srcObject = destination.stream;
         audio.autoplay = true;
-        audio.playsInline = true; // For wider compatibility
+        audio.playsInline = true;
         audio.muted = isDeaf;
 
-        // Attach to DOM (hidden) to satisfy some browser autoplay policies
+        // Apply saved per-user volume
+        const vol = userVolumes[userId] !== undefined ? userVolumes[userId] : 1.0;
+        audio.volume = vol;
+
+        // Attach to DOM (hidden)
         audio.style.display = 'none';
         document.body.appendChild(audio);
 
@@ -646,9 +824,11 @@ async function startLocalAudio() {
             const source = audioContext.createMediaStreamSource(hardwareStream);
             const highpass = audioContext.createBiquadFilter();
 
-            // Highpass Filter: Cuts low frequency rumble (fans, traffic, bumps)
+            // Improved Highpass Filter: Cuts low frequency rumble/hum
+            // Using 150Hz is safer for human voice while cutting more noise
             highpass.type = 'highpass';
-            highpass.frequency.value = 100; // 100Hz cutoff
+            highpass.frequency.value = 150;
+            highpass.Q.value = 1.0;
 
             const destination = audioContext.createMediaStreamDestination();
 
@@ -717,6 +897,12 @@ function handleVoiceStateUpdate({ id, isSpeaking }) {
 }
 
 function addMessage(data) {
+    messageHistory.push(data);
+    saveMessages(myRoomId, messageHistory);
+    addMessageToUI(data);
+}
+
+function addMessageToUI(data) {
     const container = document.getElementById('messages-container');
     if (!container) return;
     const msgEl = document.createElement('div');
@@ -796,15 +982,26 @@ function showSettings() {
     // Device Select Logic
     document.getElementById('input-device-select').onchange = async (e) => {
         selectedInput = e.target.value;
+        saveSettings();
         await startLocalAudio();
     };
     document.getElementById('output-device-select').onchange = (e) => {
         selectedOutput = e.target.value;
+        saveSettings();
+        // Update current remote streams to use new output device
+        Object.values(remoteStreams).forEach(audio => {
+            if (typeof audio.setSinkId === 'function') {
+                audio.setSinkId(selectedOutput).catch(err => console.warn('setSinkId failed', err));
+            }
+        });
     };
 
     // ANC Toggle Logic
     const ancToggle = document.getElementById('anc-toggle');
-    ancToggle.onclick = toggleNoiseSuppression; // Reuse same function
+    ancToggle.onclick = () => {
+        toggleNoiseSuppression();
+        saveSettings();
+    };
 }
 
 showLogin();
