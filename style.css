@@ -478,8 +478,8 @@ select {
 #video-player-container {
   position: absolute;
   top: 50px;
-  left: 240px;
-  right: 240px;
+  left: 0;
+  right: 0;
   bottom: 0;
   background: #000;
   z-index: 100;
