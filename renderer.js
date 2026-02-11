@@ -40,8 +40,14 @@ const peers = {};
 const remoteStreams = {}; // Keep track for deafen logic
 const userVolumes = {}; // Per-user volume: userVolumes[socketId] = 0.0 - 1.0
 
+// Screen Sharing States
+let screenStream = null;
+let isSharingScreen = false;
+let videoPeers = {}; // Separate peers for video transmission to avoid track mixing issues in Simple-Peer
+
 // --- localStorage Persistence ---
 function saveSettings() {
+    // Only save essential UI/User settings
     const settings = {
         selectedInput,
         selectedOutput,
@@ -210,6 +216,23 @@ async function initApp() {
         if (!isMuted) toggleMute();
         alert('Yönetici tarafından sesiniz kapatıldı.');
     });
+
+    socket.on('user-screen-share-started', ({ id, nickname, channelName }) => {
+        if (channelName === currentChannel) {
+            console.log(`${nickname} is sharing screen`);
+            // We wait for the 'stream' event on the specific peer
+            // But we can show the container now if we want, or wait for track
+            const container = document.getElementById('video-player-container');
+            if (container) container.style.display = 'flex';
+        }
+    });
+
+    socket.on('user-screen-share-stopped', ({ id }) => {
+        const container = document.getElementById('video-player-container');
+        if (container) container.style.display = 'none';
+        const vid = document.getElementById('shared-video');
+        if (vid) vid.srcObject = null;
+    });
 }
 
 function renderMainView() {
@@ -254,13 +277,27 @@ function renderMainView() {
                 
                 <!-- Connection Panel (Appears when in voice) -->
                 <div id="voice-control-panel" style="display: none; height: 40px; background: #1e1f22; border-top: 1px solid var(--border); padding: 0 12px; display: flex; align-items: center; justify-content: space-between;">
-                    <div style="color: var(--success); font-size: 11px; font-weight: 700;">BAĞLANDI</div>
-                    <button class="icon-btn disconnect" id="voice-disconnect" title="Bağlantıyı Kes" style="font-size: 20px;">📞</button>
+                    <div style="display: flex; align-items: center; gap: 4px;">
+                        <div style="color: var(--success); font-size: 11px; font-weight: 700;">BAĞLANDI</div>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="icon-btn" id="share-screen-btn" title="Ekran Paylaş" style="font-size: 16px;">🖥️</button>
+                        <button class="icon-btn disconnect" id="voice-disconnect" title="Bağlantıyı Kes" style="font-size: 20px;">📞</button>
+                    </div>
                 </div>
             </div>
             
             <!-- Center: Chat -->
-            <div class="main-content">
+            <div class="main-content" style="position: relative;">
+                <div id="video-player-container">
+                    <div class="video-wrapper">
+                        <video id="shared-video" autoplay></video>
+                        <div class="video-controls">
+                            <button class="icon-btn" id="expand-video" title="Tam Ekran">⛶</button>
+                            <button class="icon-btn disconnect" id="stop-watch-btn" title="Kapat">✕</button>
+                        </div>
+                    </div>
+                </div>
                 <div id="messages-container"></div>
                 <div class="chat-input-wrapper">
                     <div class="chat-input-container">
@@ -305,6 +342,16 @@ function setupMainControls() {
     document.getElementById('mute-toggle').onclick = toggleMute;
     document.getElementById('deafen-toggle').onclick = toggleDeafen;
     document.getElementById('voice-disconnect').onclick = leaveVoice;
+    document.getElementById('share-screen-btn').onclick = toggleScreenShare;
+    document.getElementById('stop-watch-btn').onclick = () => {
+        document.getElementById('video-player-container').style.display = 'none';
+        const vid = document.getElementById('shared-video');
+        vid.srcObject = null;
+    };
+    document.getElementById('expand-video').onclick = () => {
+        const vid = document.getElementById('shared-video');
+        if (vid.requestFullscreen) vid.requestFullscreen();
+    };
 
     // Add Channel Button Logic
     document.getElementById('add-channel-btn').onclick = () => {
@@ -699,12 +746,14 @@ function playConnectionSound() {
 // --- Peer Logic ---
 
 function createPeer(userId, initiator) {
-    const streamToSend = localStream || hardwareStream;
+    const streams = [];
+    if (localStream) streams.push(localStream);
+    if (screenStream) streams.push(screenStream);
 
     const peer = new Peer({
         initiator: initiator,
-        trickle: true, // Enable trickle ICE for better connectivity
-        stream: streamToSend,
+        trickle: true,
+        streams: streams, // Peer can take multiple streams
         config: {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
@@ -729,51 +778,53 @@ function createPeer(userId, initiator) {
     });
 
     peer.on('stream', (stream) => {
-        console.log(`Received stream from ${userId}`, stream);
+        const isVideo = stream.getVideoTracks().length > 0;
+        console.log(`Received ${isVideo ? 'video' : 'audio'} stream from ${userId}`, stream);
 
-        const ctx = getAudioContext();
-        const source = ctx.createMediaStreamSource(stream);
+        if (isVideo) {
+            const vid = document.getElementById('shared-video');
+            vid.srcObject = stream;
+            document.getElementById('video-player-container').style.display = 'flex';
+        } else {
+            const ctx = getAudioContext();
+            const source = ctx.createMediaStreamSource(stream);
 
-        // Highpass filter to remove low-frequency hum/rumble (ALWAYS applied for incoming)
-        const highpass = ctx.createBiquadFilter();
-        highpass.type = 'highpass';
-        highpass.frequency.value = 150; // Stricter cutoff for cleaner audio
-        highpass.Q.value = 1.0;
+            // Highpass filter to remove low-frequency hum/rumble (ALWAYS applied for incoming)
+            const highpass = ctx.createBiquadFilter();
+            highpass.type = 'highpass';
+            highpass.frequency.value = 150;
+            highpass.Q.value = 1.0;
 
-        // Lowpass to cut high-frequency hiss
-        const lowpass = ctx.createBiquadFilter();
-        lowpass.type = 'lowpass';
-        lowpass.frequency.value = 10000; // 10kHz cutoff
+            const lowpass = ctx.createBiquadFilter();
+            lowpass.type = 'lowpass';
+            lowpass.frequency.value = 10000;
 
-        const destination = ctx.createMediaStreamDestination();
-        source.connect(highpass);
-        highpass.connect(lowpass);
-        lowpass.connect(destination);
+            const destination = ctx.createMediaStreamDestination();
+            source.connect(highpass);
+            highpass.connect(lowpass);
+            lowpass.connect(destination);
 
-        const audio = document.createElement('audio');
-        audio.srcObject = destination.stream;
-        audio.autoplay = true;
-        audio.playsInline = true;
-        audio.muted = isDeaf;
+            const audio = document.createElement('audio');
+            audio.srcObject = destination.stream;
+            audio.autoplay = true;
+            audio.playsInline = true;
+            audio.muted = isDeaf;
 
-        // Apply saved per-user volume
-        const vol = userVolumes[userId] !== undefined ? userVolumes[userId] : 1.0;
-        audio.volume = vol;
+            const vol = userVolumes[userId] !== undefined ? userVolumes[userId] : 1.0;
+            audio.volume = vol;
 
-        // Attach to DOM (hidden)
-        audio.style.display = 'none';
-        document.body.appendChild(audio);
+            audio.style.display = 'none';
+            document.body.appendChild(audio);
 
-        if (selectedOutput !== 'default') {
-            if (typeof audio.setSinkId === 'function') {
-                audio.setSinkId(selectedOutput).catch(err => console.warn('setSinkId failed', err));
+            if (selectedOutput !== 'default') {
+                if (typeof audio.setSinkId === 'function') {
+                    audio.setSinkId(selectedOutput).catch(err => console.warn('setSinkId failed', err));
+                }
             }
+
+            audio.play().catch(e => console.error(`Audio play failed for ${userId}:`, e));
+            remoteStreams[userId] = audio;
         }
-
-        // Explicit play attempt
-        audio.play().catch(e => console.error(`Audio play failed for ${userId}:`, e));
-
-        remoteStreams[userId] = audio;
     });
 
     peer.on('close', () => removePeer(userId));
@@ -990,6 +1041,62 @@ function showSettings() {
         toggleNoiseSuppression();
         saveSettings();
     };
+}
+
+async function startScreenShare(sourceId) {
+    try {
+        screenStream = await navigator.mediaDevices.getUserMedia({
+            audio: false,
+            video: {
+                mandatory: {
+                    chromeMediaSource: 'desktop',
+                    chromeMediaSourceId: sourceId,
+                    minWidth: 1280,
+                    maxWidth: 1920,
+                    minHeight: 720,
+                    maxHeight: 1080,
+                    maxFrameRate: 30
+                }
+            }
+        });
+
+        isSharingScreen = true;
+        const btn = document.getElementById('share-screen-btn');
+        btn.classList.add('active-share');
+
+        // Add screen stream to all existing peers
+        Object.values(peers).forEach(peer => {
+            peer.addStream(screenStream);
+        });
+
+        // Handle stream ending (user clicks 'Stop Sharing' in OS bar)
+        screenStream.getVideoTracks()[0].onended = () => stopScreenShare();
+
+        // Notify other users that we started sharing
+        socket.emit('screen-share-started', { roomId: myRoomId, channelName: currentChannel });
+
+    } catch (err) {
+        console.error('Screen share error:', err);
+    }
+}
+
+function stopScreenShare() {
+    if (screenStream) {
+        // Remove stream from all peers before stopping tracks
+        Object.values(peers).forEach(peer => {
+            try {
+                peer.removeStream(screenStream);
+            } catch (e) { console.warn("removeStream failed", e); }
+        });
+
+        screenStream.getTracks().forEach(t => t.stop());
+        screenStream = null;
+    }
+    isSharingScreen = false;
+    const btn = document.getElementById('share-screen-btn');
+    btn.classList.remove('active-share');
+
+    socket.emit('screen-share-stopped', { roomId: myRoomId });
 }
 
 showLogin();
